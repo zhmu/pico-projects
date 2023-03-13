@@ -1,0 +1,25 @@
+# inspired by https://thatonegamedev.com/cpp/ci-cd-for-c-c-games-using-github-actions/
+on: [push, pull_request]
+name: ci
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout source
+              uses: actions/checkout@v2
+              with:
+                submodules: recursive
+
+            - name: Install prerequisites
+              run: |
+                    sudo apt-get update -qq
+                    sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi gdb-multiarch cmake ninja-build
+
+            - name: Prepare build environment
+              run: |
+                    cmake -S . -B build -GNinja -DCMAKE_C_COMPILER:FILEPATH=/usr/bin/arm-none-eabi-gcc
+
+            - name: Build
+              run: |
+                    cmake --build ./build --config Release

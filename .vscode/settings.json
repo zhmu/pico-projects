@@ -1,0 +1,6 @@
+{
+    "cmake.buildBeforeRun": true,
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "cortex-debug.openocdPath": "/opt/openocd-pico/bin/openocd",
+    "cortex-debug.toolchainPrefix": "arm-none-eabi"
+}
