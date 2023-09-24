@@ -8,13 +8,21 @@
 #include <cstdio>
 #include <array>
 #include <initializer_list>
+#include <charconv>
 #include <random>
+#include <span>
 #include <string_view>
+#include <algorithm>
 #include <limits>
 #include <type_traits>
 #include "pico/time.h"
+#include "hardware/clocks.h"
 #include "hardware/irq.h"
 #include "hardware/pwm.h"
+#include "hardware/rtc.h"
+#include "hardware/sync.h"
+
+#include "eye.h"
 
 extern "C" {
 #include "fonts/nokia-fonts.h"
@@ -23,7 +31,7 @@ extern "C" {
 namespace
 {
     constexpr auto messages = std::to_array<std::string_view>({
-        "Murder all cows",
+        "Eet meer vlees",
         "Obey your elders",
         "We are listening",
         "We are everywhere",
@@ -31,7 +39,16 @@ namespace
         "Submit",
         "Privacy is not an option",
         "GJ phone home",
+        "Het duurt niet lang meer",
+        "Dat ging maar net goed",
+        "5G maakt het mogelijk",
+        "#0" // Eye
     });
+    std::uniform_int_distribution<> messagesDist(0, messages.size() - 1);
+
+    // Seconds slept between messages
+    //std::uniform_int_distribution<> sleepSecondsDist(30, 90);
+    std::uniform_int_distribution<> sleepSecondsDist(3, 5);
 }
 
 struct LcdPinConfig {
@@ -162,32 +179,45 @@ struct Lcd
     }
 };
 
-template<typename Lcd, typename GetCharFn>
-void DrawText(Lcd& lcd, GetCharFn charFn, int x_origin, int y_origin, std::string_view sv)
+template<typename GetGlyphFn>
+class Font
 {
-    // Determine the resulting type of a call to charFn(char)
-    using GetCharFnResult = std::invoke_result_t<GetCharFn, char>;
-    using GlyphType = std::remove_pointer_t<GetCharFnResult>;
-
-    // Determine number of bits and rows to render
+    using GetGlyphFnResult = std::invoke_result_t<GetGlyphFn, char>;
+    using GlyphType = std::remove_pointer_t<GetGlyphFnResult>;
     using RowValueType = std::remove_extent_t<decltype(GlyphType::rows)>;
-    const auto numberOfBits = std::numeric_limits<RowValueType>::digits;
 
-    // Calculate amount of glyph rows to render
+public:
+    static inline constexpr auto FontHeight = sizeof(GlyphType::rows) / sizeof(GlyphType::rows[0]);
+    static inline constexpr auto BitsPerGlyphRow = std::numeric_limits<RowValueType>::digits;
+
+    static const auto GetGlyphWidth(GetGlyphFn getGlyph, char ch)
+    {
+        const auto glyph = getGlyph(ch);
+        return glyph ? glyph->advance : 0;
+    }
+};
+
+template<typename Lcd, typename GetGlyphFn>
+void DrawText(Lcd& lcd, GetGlyphFn getGlyph, int x_origin, int y_origin, std::string_view sv)
+{
+    using TheFont = Font<GetGlyphFn>;
+
+    // Calculate amount of pixel rows to render (performs clipping)
     const auto numberOfRows = [&]() -> int {
-        const auto rowCount = sizeof(GlyphType::rows) / sizeof(GlyphType::rows[0]);
+        constexpr auto rowCount = TheFont::FontHeight;
         if (y_origin + rowCount >= Lcd::numRowPixels) {
             return Lcd::numRowPixels - y_origin;
         }
         return rowCount;
     }();
 
-    for(auto s: sv) {
-        const GlyphType* glyph = charFn(s);
+    const auto numberOfBits = TheFont::BitsPerGlyphRow;
+    for(auto ch: sv) {
+        const auto glyph = getGlyph(ch);
         if (glyph == nullptr)
             continue;
 
-        // Determine amount of glyph columns to render
+        // Determine amount of glyph columns to render (performs clipping)
         const auto width = [&]() -> int {
             if (x_origin + glyph->width > Lcd::numColumnPixels) {
                 return Lcd::numColumnPixels - x_origin;
@@ -207,40 +237,72 @@ void DrawText(Lcd& lcd, GetCharFn charFn, int x_origin, int y_origin, std::strin
     }
 }
 
-template<typename GetCharFn>
-int CalculateWidth(GetCharFn charFn, std::string_view sv)
-{
-    int width = 0;
-    for(auto s: sv) {
-        const auto glyph = charFn(s);
-        if (glyph == nullptr)
-            continue;
+struct WidthAndSpan {
+    int width;
+    int start_offset;
+    int end_offset;
+};
 
-        width += glyph->advance;
+template<typename GetGlyphFn>
+auto SplitTextInWords(GetGlyphFn glyphFn, std::string_view sv)
+{
+    auto isSpace = [](const char ch) { return ch == ' '; };
+
+    std::vector<WidthAndSpan> words;
+    for (size_t current_index = 0; current_index < sv.size(); ) {
+        int current_index_width = 0;
+        auto next_index = current_index;
+        while(next_index < sv.size() && !isSpace(sv[next_index])) {
+            current_index_width += Font<GetGlyphFn>::GetGlyphWidth(glyphFn, sv[next_index]);
+            ++next_index;
+        }
+
+        words.emplace_back(current_index_width, current_index, next_index);
+        while(next_index < sv.size() && isSpace(sv[next_index]))
+            ++next_index;
+        current_index = next_index;
     }
-    return width;
+    return words;
 }
 
-int CalculateSmallFontWidth(std::string_view sv)
+template<typename Lcd, typename GetGlyphFn>
+auto CombineWordsToLines(Lcd& lcd, GetGlyphFn glyphFn, std::span<const WidthAndSpan> words)
 {
-    return CalculateWidth(nokia_get_small_char, sv);
+    const auto space_width = Font<GetGlyphFn>::GetGlyphWidth(glyphFn, ' ');
+
+    std::vector<WidthAndSpan> lines;
+    for(size_t current_word_index = 0; current_word_index < words.size(); ) {
+        // Always place the first word in the line, no matter how wide it is
+        int current_width = words[current_word_index].width;
+        const auto start_offset = words[current_word_index].start_offset;
+        int end_offset = words[current_word_index].end_offset;
+        ++current_word_index;
+
+        // Try to place as many words as will fit
+        while(current_word_index < words.size()) {
+            const auto word_width = space_width + words[current_word_index].width;
+            if (current_width + word_width >= Lcd::numColumnPixels)
+                break;
+            current_width += word_width;
+            end_offset = words[current_word_index].end_offset;
+            ++current_word_index;
+        }
+
+        lines.emplace_back(current_width, start_offset, end_offset);
+    }
+    return lines;
 }
 
-int CalculateBigFontWidth(std::string_view sv)
+template<typename Lcd, typename GetGlyphFn>
+void CenterText(Lcd& lcd, GetGlyphFn getGlyph, std::string_view sv, std::span<const WidthAndSpan> lines)
 {
-    return CalculateWidth(nokia_get_big_char, sv);
-}
-
-template<typename Lcd>
-void DrawSmallText(Lcd& lcd, int x_origin, int y_origin, std::string_view sv)
-{
-    DrawText(lcd, nokia_get_small_char, x_origin, y_origin, sv);
-}
-
-template<typename Lcd>
-void DrawBigText(Lcd& lcd, int x_origin, int y_origin, std::string_view sv)
-{
-    DrawText(lcd, nokia_get_big_char, x_origin, y_origin, sv);
+    constexpr auto font_height = Font<GetGlyphFn>::FontHeight;
+    int current_y = (Lcd::numRowPixels - (lines.size() * font_height)) / 2;
+    for(const auto& line: lines) {
+        const auto current_x = (Lcd::numColumnPixels - line.width) / 2;
+        DrawText(lcd, getGlyph, current_x, current_y, sv.substr(line.start_offset, line.end_offset - line.start_offset));
+        current_y += font_height;
+    }
 }
 
 template<typename Lcd>
@@ -253,14 +315,37 @@ template<typename Lcd, typename Rng>
 void GenerateNoise(Lcd& lcd, Rng& rng)
 {
     std::uniform_int_distribution dist(0, 255);
-    for(auto& byte: lcd.data) {
-        byte = dist(rng);
-    }
+    std::ranges::for_each(lcd.data, [&](auto& byte) { byte = dist(rng); });
 }
 
-void EfficientDelayMs(int ms)
+template<typename Lcd>
+void DrawImage(Lcd& lcd, [[maybe_unused]] int imageNo)
 {
-    sleep_ms(ms);
+    std::copy(imageEye.begin(), imageEye.end(), lcd.data.begin());
+}
+
+void SleepSeconds(int seconds)
+{
+    datetime_t initial_time = {
+        .year  = 2023,
+        .month = 9,
+        .day   = 23,
+        .dotw  = 6, // Saturday
+        .hour  = 12,
+        .min   = 0,
+        .sec   = 0
+    };
+    auto wakeup_time = initial_time;
+    while(seconds >= 60) {
+        ++wakeup_time.min;
+        seconds -= 60;
+    }
+    wakeup_time.sec += seconds;
+
+    rtc_init();
+    rtc_set_datetime(&initial_time);
+    rtc_set_alarm(&wakeup_time, nullptr);
+    __wfi();
 }
 
 int main()
@@ -269,31 +354,39 @@ int main()
 
     Lcd<LcdPinConfig> nokiaLcd;
 
-    nokiaLcd.Reset();
-
     for(;;)
     {
+        nokiaLcd.Reset();
+
         // Step 1: noise screen
         for(int round = 0; round < 10; ++round) {
             GenerateNoise(nokiaLcd, rng);
             nokiaLcd.Update();
-            EfficientDelayMs(100);
+            sleep_ms(100);
         }
 
         // Step 2: place text on screen
-        std::uniform_int_distribution<> messagesDist(0, messages.size() - 1);
-        std::string_view sv = messages[messagesDist(rng)];
-        const auto w = CalculateSmallFontWidth(sv);
-        ClearLcd(nokiaLcd);
-        DrawSmallText(nokiaLcd, (nokiaLcd.numColumnPixels - w) / 2, (nokiaLcd.numRowPixels - 8) / 2, sv);
-        nokiaLcd.Update();
+        {
+            std::string_view sv = messages[messagesDist(rng)];
+            ClearLcd(nokiaLcd);
+            if (!sv.empty() && sv[0] == '#') {
+                int imageNo{};
+                std::from_chars(sv.begin() + 1, sv.end(), imageNo);
+                DrawImage(nokiaLcd, imageNo);
+            } else {
+                const auto words = SplitTextInWords(nokia_get_small_char, sv);
+                const auto lines = CombineWordsToLines(nokiaLcd, nokia_get_small_char, words);
+                CenterText(nokiaLcd, nokia_get_small_char, sv, lines);
+            }
+            nokiaLcd.Update();
+        }
 
         // Step 3: haunting backlight
         int value = 0;
-        int delta = 16;
-        for(int count = 0; count < 30; ++count) {
+        int delta = 4;
+        for(int count = 0; count < 50; ++count) {
             value += delta;
-            if (value <= 0 || value >= 255)
+            if (value <= 0 || value >= 128)
             {
                 delta = -delta;
             }
@@ -301,13 +394,12 @@ int main()
             {
                 nokiaLcd.SetBacklight(value * value);
             }
-            EfficientDelayMs(25);
+            sleep_ms(100);
         }
 
         // Step 4: shutdown
         nokiaLcd.SetBacklight(0);
         nokiaLcd.PowerDown();
-        EfficientDelayMs(1000);
-        nokiaLcd.Reset();
+        SleepSeconds(sleepSecondsDist(rng));
     }
 }
