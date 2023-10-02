@@ -21,6 +21,10 @@
 #include "hardware/pwm.h"
 #include "hardware/rtc.h"
 #include "hardware/sync.h"
+#include "hardware/pll.h"
+#include "hardware/spi.h"
+
+#include "pico/sleep.h"
 
 #include "eye.h"
 
@@ -43,21 +47,42 @@ namespace
         "Dat ging maar net goed",
         "5G maakt het mogelijk",
         "#0" // Eye
+        "Alles op X is nep",
+        "X doesn't mark the spot",
+        "Niemand gelooft je",
+        "The truth is lost to us",
+        "The matrix is a3@*792 lie",
+        "The cake is real",
+        "Was dat nu de rode of groene pil?",
+        "Platte televisies geven ook straling",
+        "Breedbeeld is een leugen",
+        "We zijn nooit op de maan geweest",
+        "De Illuminatie zitten op Tinder",
+        "Alles op Facebook is echt",
+        "Studie is intellectuele uitdaging voor het kuddevolk",
+        "Iedereen weet waar je bent",
+        "Niemand volgt je elke dag",
+        "Consumeer, voordat het op is",
+        "Ik luister mee",
+        "Wat denk je nu echt?",
+        "Wie luistert er dan niet mee?",
+        "Zonnepanelen ontvangen ook signalen"
     });
     std::uniform_int_distribution<> messagesDist(0, messages.size() - 1);
 
     // Seconds slept between messages
-    //std::uniform_int_distribution<> sleepSecondsDist(30, 90);
-    std::uniform_int_distribution<> sleepSecondsDist(3, 5);
+    std::uniform_int_distribution<> sleepSecondsDist(30, 90);
+    // std::uniform_int_distribution<> sleepSecondsDist(3, 5);
 }
 
 struct LcdPinConfig {
-    static constexpr auto inline Backlight = 17;
-    static constexpr auto inline Reset = 18;
-    static constexpr auto inline ChipEnable = 19;
-    static constexpr auto inline DataCommand = 20;
-    static constexpr auto inline DataIn = 21;
-    static constexpr auto inline Clock = 22;
+    static const auto inline SpiPeripheral = spi0;
+    static constexpr auto inline Backlight = 16;
+    static constexpr auto inline Reset = 20;
+    static constexpr auto inline ChipEnable = 17; // SPI0 CSn
+    static constexpr auto inline DataCommand = 21;
+    static constexpr auto inline DataIn = 19; // SPI0 TX
+    static constexpr auto inline Clock = 18; // SPI0 SCK
 };
 
 template<typename Pin>
@@ -71,7 +96,7 @@ struct Lcd
 
     Lcd()
     {
-        for (auto p: { Pin::Reset, Pin::ChipEnable, Pin::DataCommand, Pin::DataIn, Pin::Clock}) {
+        for (auto p: { Pin::Reset, Pin::ChipEnable, Pin::DataCommand}) {
             gpio_init(p);
             gpio_set_dir(p, GPIO_OUT);
             gpio_put(p, 0);
@@ -81,6 +106,11 @@ struct Lcd
         pwm_config_set_clkdiv(&config, 4.f);
         const auto slice_num = pwm_gpio_to_slice_num(Pin::Backlight);
         pwm_init(slice_num, &config, true);
+
+        spi_init(Pin::SpiPeripheral, 1'000'000);
+        spi_set_format(Pin::SpiPeripheral, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+        gpio_set_function(Pin::Clock, GPIO_FUNC_SPI);
+        gpio_set_function(Pin::DataIn, GPIO_FUNC_SPI);
     }
 
     void SetBacklight(uint16_t level)
@@ -88,24 +118,14 @@ struct Lcd
         pwm_set_gpio_level(Pin::Backlight, level);
     }
 
-    void SetChipEnable(bool enable)
-    {
-        gpio_put(Pin::ChipEnable, enable ? 0 : 1);
-    }
-
     void SetDC(DC dc)
     {
         gpio_put(Pin::DataCommand, dc == DC::Command ? 0 : 1);
     }
 
-    void SetData(bool enable)
+    void SetChipEnable(bool enable)
     {
-        gpio_put(Pin::DataIn, enable);
-    }
-
-    void SetClock(bool raise)
-    {
-        gpio_put(Pin::Clock, raise);
+        gpio_put(Pin::ChipEnable, enable ? 0 : 1);
     }
 
     void Reset()
@@ -116,10 +136,8 @@ struct Lcd
 
         // 12 - T_WL(RES) minimum 100 ns... this is way too long
         for(int n = 0; n < 10; ++n) {
-            SetClock(true);
-            sleep_ms(1);
-            SetClock(false);
-            sleep_ms(1);
+           const uint8_t dummy = 0;
+           spi_write_blocking(Pin::SpiPeripheral, &dummy, 1);
         }
         gpio_put(Pin::Reset, 1);
         sleep_ms(10);
@@ -131,7 +149,6 @@ struct Lcd
         WriteCommand(0b00001100); // display control, D=1, E=0 
 
         std::fill(data.begin(), data.end(), 0);
-        //Update();
     }
 
     void PowerDown()
@@ -149,33 +166,13 @@ struct Lcd
     void Update()
     {
         SetDC(DC::Data);
-        for(size_t n = 0; n < data.size(); ++n) {
-            WriteByte(data[n]);
-        }
-    }
-
-    void WriteByte(uint8_t data)
-    {
-        // TODO We don't actually need to sleeep 1us, we can sleep 1ns...
-        for(int n = 7; n >= 0; --n) {
-            SetData((data & (1 << n)) != 0);
-            SetClock(true);
-            sleep_us(1);
-            SetClock(false);
-            sleep_us(1);
-        }
+        spi_write_blocking(Pin::SpiPeripheral, data.data(), data.size());
     }
 
     void WriteCommand(uint8_t cmd)
     {
         SetDC(DC::Command);
-        WriteByte(cmd);
-    }
-
-    void WriteData(uint8_t cmd)
-    {
-        SetDC(DC::Data);
-        WriteByte(cmd);
+        spi_write_blocking(Pin::SpiPeripheral, &cmd, 1);
     }
 };
 
@@ -354,6 +351,9 @@ int main()
 
     Lcd<LcdPinConfig> nokiaLcd;
 
+    // Switch to XOSC; this drops the clock speed to roughly 12MHz (from
+    // 133MHz) and drops power consumption from 100mA to rougly 9mA
+    sleep_run_from_xosc();
     for(;;)
     {
         nokiaLcd.Reset();
