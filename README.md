@@ -4,6 +4,10 @@ This is my development environment for Raspberry Pico-based microcontrollers. It
 
 I use standard Raspberry Pico's with a Raspberry Pico Debug Probe. My development machine runs Debian/testing, which is currently _bookworm_ (Debian 12).
 
+## Projects
+
+[Nokia 3310-clone which displays random, preset messages](src/nokia-lcd/README.md)
+
 ## Setting up
 
 There are nested submodules in here, so start by executing:
