@@ -27,6 +27,8 @@
 #include "pico/sleep.h"
 
 #include "eye.h"
+#include "bird.h"
+#include "camera.h"
 
 extern "C" {
 #include "fonts/nokia-fonts.h"
@@ -66,13 +68,32 @@ namespace
         "Ik luister mee",
         "Wat denk je nu echt?",
         "Wie luistert er dan niet mee?",
-        "Zonnepanelen ontvangen ook signalen"
+        "Zonnepanelen ontvangen ook signalen",
+        "GMO will save the world",
+        "Dolly was niet alleen",
+        // https://en.wikipedia.org/wiki/Birds_Aren%27t_Real
+        "#1", // Bird
+        "Vogels lijken net echt",
+        "Vogelpoep is a natuurlijke tracking mechanisme",
+        "Surveillance is freedom",
+        "#2", // Camera
+        // https://en.wikipedia.org/wiki/Bielefeld_conspiracy
+        "Bielefeld? Das gibt's doch gar nicht"
+        "#0",
+        "#1",
+        "#2",
     });
     std::uniform_int_distribution<> messagesDist(0, messages.size() - 1);
 
+    constexpr auto images = std::to_array<std::span<const uint8_t>>({
+        imageEye,
+        imageBird,
+        imageCamera
+    });
+
     // Seconds slept between messages
     std::uniform_int_distribution<> sleepSecondsDist(30, 90);
-    // std::uniform_int_distribution<> sleepSecondsDist(3, 5);
+    //std::uniform_int_distribution<> sleepSecondsDist(3, 5);
 }
 
 struct LcdPinConfig {
@@ -146,7 +167,7 @@ struct Lcd
         WriteCommand(0b00100001); // function set, PD=0, V=0, H=1
         WriteCommand(0b01001000); // set vop
         WriteCommand(0b00100000); // function set, PD=0, V=0, H=0
-        WriteCommand(0b00001100); // display control, D=1, E=0 
+        WriteCommand(0b00001100); // display control, D=1, E=0
 
         std::fill(data.begin(), data.end(), 0);
     }
@@ -316,9 +337,9 @@ void GenerateNoise(Lcd& lcd, Rng& rng)
 }
 
 template<typename Lcd>
-void DrawImage(Lcd& lcd, [[maybe_unused]] int imageNo)
+void DrawImage(Lcd& lcd, std::span<const uint8_t> imageData)
 {
-    std::copy(imageEye.begin(), imageEye.end(), lcd.data.begin());
+    std::copy(imageData.begin(), imageData.end(), lcd.data.begin());
 }
 
 void SleepSeconds(int seconds)
@@ -372,7 +393,8 @@ int main()
             if (!sv.empty() && sv[0] == '#') {
                 int imageNo{};
                 std::from_chars(sv.begin() + 1, sv.end(), imageNo);
-                DrawImage(nokiaLcd, imageNo);
+                imageNo = std::min(imageNo, static_cast<int>(images.size() - 1));
+                DrawImage(nokiaLcd, images[imageNo]);
             } else {
                 const auto words = SplitTextInWords(nokia_get_small_char, sv);
                 const auto lines = CombineWordsToLines(nokiaLcd, nokia_get_small_char, words);
