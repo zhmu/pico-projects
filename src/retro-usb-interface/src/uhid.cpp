@@ -74,6 +74,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, const uint8_t* desc_re
             printf("hid address %d instance %d: error: cannot request to receive report\n", dev_addr, instance);
         }
     } else {
+        // TODO implement if we find a device that doesn't properly support boot protocol
         printf("hid address %d instance %d: ignoring uninteresting protocol %d\n", dev_addr, instance, itf_protocol);
     }
 }
@@ -81,8 +82,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, const uint8_t* desc_re
 // Invoked when device with hid interface is un-mounted
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance)
 {
-    printf("hid: unmounted, address %d, instance %d\n", dev_addr, instance);
+    if (hidMouse && hidMouse->dev_addr == dev_addr && hidMouse->instance == instance) {
+        printf("hid: unmounted hid mouse, address %d, instance %d\n", dev_addr, instance);
+        hidMouse.reset();
+    } else {
+        printf("hid: unmounted unrecognized device, address %d, instance %d\n", dev_addr, instance);
+    }
 }
+
 // Invoked when received report from device via interrupt endpoint
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len)
 {
