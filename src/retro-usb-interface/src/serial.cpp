@@ -158,11 +158,13 @@ namespace serial
 
         const uint8_t byte1 = (x & 0b0011'1111);
         const uint8_t byte2 = (y & 0b0011'1111);
+        const uint8_t byte3 = (event.button & mouse::ButtonMiddle) ? 0b010'0000 : 0;
 
         const auto irq_state = save_and_disable_interrupts();
         EnqueueByte(byte0);
         EnqueueByte(byte1);
         EnqueueByte(byte2);
+        if (byte3) EnqueueByte(byte3);
         restore_interrupts(irq_state);
     }
 
@@ -176,6 +178,7 @@ namespace serial
             printf("Sending ID\n");
             const auto irq_state = save_and_disable_interrupts();
             EnqueueByte('M');
+            EnqueueByte('3');
             restore_interrupts(irq_state);
         }
     }
