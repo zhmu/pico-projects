@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <optional>
 #include "tusb.h"
+#include "mouse.h"
 
 namespace
 {
@@ -43,16 +44,15 @@ namespace
 
 void HidMouse::processMouseReport(const hid_mouse_report_t& report)
 {
-    const auto button_changed_mask = report.buttons ^ prev_report.buttons;
-    printf("hid: mouse: ");
-    if (button_changed_mask & report.buttons) {
-        printf(" %c%c%c",
-            report.buttons & MOUSE_BUTTON_LEFT   ? 'L' : '-',
-            report.buttons & MOUSE_BUTTON_MIDDLE ? 'M' : '-',
-            report.buttons & MOUSE_BUTTON_RIGHT  ? 'R' : '-');
-    }
-
-    printf(" (%d %d %d)\n", report.x, report.y, report.wheel);
+    uint8_t button{};
+    if (report.buttons & MOUSE_BUTTON_LEFT) button |= mouse::ButtonLeft;
+    if (report.buttons & MOUSE_BUTTON_RIGHT) button |= mouse::ButtonRight;
+    if (report.buttons & MOUSE_BUTTON_MIDDLE) button |= mouse::ButtonMiddle;
+    mouse::OnNewEvent({
+        .delta_x = report.x,
+        .delta_y = report.y,
+        .button = button
+    });
 }
 
 
@@ -104,7 +104,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             break;
 
         case HID_ITF_PROTOCOL_MOUSE:
-            printf("hid: dev_addr %d instance %d, received boot mouse report\n", dev_addr, instance);
+            // printf("hid: dev_addr %d instance %d, received boot mouse report\n", dev_addr, instance);
             hidMouse->processMouseReport(*reinterpret_cast<const hid_mouse_report_t*>(report));
             break;
 

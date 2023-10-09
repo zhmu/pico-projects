@@ -31,6 +31,8 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "bsp/board_api.h" // for board_init()
+#include "serial.h"
+#include "mouse.h"
 #include "tusb.h"
 
 namespace pin {
@@ -70,11 +72,18 @@ int main()
 
     gpio_init(pin::LED1);
     gpio_set_dir(pin::LED1, GPIO_OUT);
-    printf("Retro USB interface: ready\n");
 
     LedBlinkTask blinkTask;
+    serial::SerialMouse serialMouse;
+
+    printf("Retro USB interface: ready\n");
     while (1) {
         tuh_task();
         blinkTask.Run();
+        serialMouse.Run();
+
+        if (auto event = mouse::RetrieveAndResetPendingEvent(); event) {
+            serialMouse.SendEvent(*event);
+        }
     }
 }
