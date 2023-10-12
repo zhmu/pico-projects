@@ -30,7 +30,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
-#include "bsp/board_api.h" // for board_init()
+#include "bsp/board.h" // for board_init()
 #include "serial.h"
 #include "mouse.h"
 #include "tusb.h"
@@ -66,9 +66,6 @@ int main()
     printf("Retro USB interface: initializing\n");
 
     tuh_init(BOARD_TUH_RHPORT);
-    if (board_init_after_tusb) {
-        board_init_after_tusb();
-    }
 
     gpio_init(pin::LED1);
     gpio_set_dir(pin::LED1, GPIO_OUT);

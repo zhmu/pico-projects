@@ -25,7 +25,7 @@
  */
 
 #include "tusb.h"
-#include "bsp/board_api.h"
+#include "bsp/board.h"
 
 //--------------------------------------------------------------------+
 // MACRO TYPEDEF CONSTANT ENUM DECLARATION
@@ -87,10 +87,10 @@ void tuh_cdc_rx_cb(uint8_t idx)
 
 void tuh_cdc_mount_cb(uint8_t idx)
 {
-  tuh_itf_info_t itf_info = { 0 };
+  tuh_cdc_itf_info_t itf_info = { 0 };
   tuh_cdc_itf_get_info(idx, &itf_info);
 
-  printf("CDC Interface is mounted: address = %u, itf_num = %u\r\n", itf_info.daddr, itf_info.desc.bInterfaceNumber);
+  printf("CDC Interface is mounted: address = %u, itf_num = %u\r\n", itf_info.daddr, itf_info.bInterfaceNumber);
 
 #ifdef CFG_TUH_CDC_LINE_CODING_ON_ENUM
   // CFG_TUH_CDC_LINE_CODING_ON_ENUM must be defined for line coding is set by tinyusb in enumeration
@@ -106,8 +106,8 @@ void tuh_cdc_mount_cb(uint8_t idx)
 
 void tuh_cdc_umount_cb(uint8_t idx)
 {
-  tuh_itf_info_t itf_info = { 0 };
+  tuh_cdc_itf_info_t itf_info = { 0 };
   tuh_cdc_itf_get_info(idx, &itf_info);
 
-  printf("CDC Interface is unmounted: address = %u, itf_num = %u\r\n", itf_info.daddr, itf_info.desc.bInterfaceNumber);
+  printf("CDC Interface is unmounted: address = %u, itf_num = %u\r\n", itf_info.daddr, itf_info.bInterfaceNumber);
 }
