@@ -24,20 +24,52 @@
  */
 #pragma once
 
-namespace mouse
-{
-    struct MouseEvent;
-}
+#include <array>
+#include <cstddef>
+#include <cstdint>
 
-namespace serial
+template<size_t Capacity, typename Element = uint8_t>
+class Fifo
 {
-    struct SerialMouse
+    std::array<Element, Capacity> buffer{};
+    size_t readOffset = 0;
+    size_t writeOffset = 0;
+
+public:
+    bool empty() const
     {
-        bool previous_dtr_state{};
-    public:
-        SerialMouse();
-        void Reset();
-        void Run();
-        void SendEvent(const mouse::MouseEvent& event);
-    };
-}
+        return readOffset == writeOffset;
+    }
+
+    bool full() const
+    {
+        return bytes_left() <= 1;
+    }
+
+    size_t bytes_left() const
+    {
+        if (readOffset < writeOffset) {
+            return writeOffset - readOffset;
+        } else {
+            return (buffer.size() - readOffset) + writeOffset;
+        }
+    }
+
+    auto peek() const
+    {
+        return buffer[readOffset];
+    }
+
+    auto pop()
+    {
+        auto value = std::move(buffer[readOffset]);
+        readOffset = (readOffset + 1) % buffer.size();
+        return value;
+    }
+
+    void push(Element&& value)
+    {
+        buffer[writeOffset] = std::move(value);
+        writeOffset = (writeOffset + 1) % buffer.size();
+    }
+};

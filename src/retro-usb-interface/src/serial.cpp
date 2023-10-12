@@ -58,6 +58,7 @@
 #include <cstdio>
 #include <utility>
 #include "mouse.h"
+#include "fifo.h"
 #include "pico/stdlib.h"
 #include "hardware/sync.h"
 
@@ -74,30 +75,20 @@ namespace serial
     }
 
     namespace {
-        std::array<uint8_t, 16> transmitBuffer{};
-        size_t transmitBufferReadOffset = 0;
-        size_t transmitBufferWriteOffset = 0;
-
-        bool IsTransmitBufferEmpty()
-        {
-            return transmitBufferReadOffset == transmitBufferWriteOffset;
-        }
+        Fifo<16> transmitFifo;
+        Fifo<16> receiveFifo;
 
         void TransmitEnqueuedByte()
         {
-            const auto ch = transmitBuffer[transmitBufferReadOffset];
-            transmitBufferReadOffset = (transmitBufferReadOffset + 1) % transmitBuffer.size();
+            const auto ch = transmitFifo.pop();
             uart_putc_raw(pin::UART, ch);
-
-            uart_set_irq_enables(pin::UART, true, !IsTransmitBufferEmpty());
+            uart_set_irq_enables(pin::UART, true, !transmitFifo.empty());
         }
 
         void EnqueueByte(uint8_t ch)
         {
-            const auto bufferEmpty = IsTransmitBufferEmpty();
-            transmitBuffer[transmitBufferWriteOffset] = ch;
-            transmitBufferWriteOffset = (transmitBufferWriteOffset + 1) % transmitBuffer.size();
-
+            const auto bufferEmpty = transmitFifo.empty();
+            transmitFifo.push(std::move(ch));
             if (bufferEmpty) {
                 TransmitEnqueuedByte();
             }
@@ -107,12 +98,13 @@ namespace serial
     void OnUartIrq()
     {
         while(uart_is_readable(pin::UART)) {
-            const auto ch = uart_getc(pin::UART);
-            printf("[%02x]", ch);
+            auto ch = uart_getc(pin::UART);
+            transmitFifo.push(std::move(ch));
         }
 
         if (uart_is_writable(pin::UART)) {
-            if (IsTransmitBufferEmpty()) {
+            if (transmitFifo.empty()) {
+                // Disable TX-empty interrupt, we have nothing left to send
                 uart_set_irq_enables(pin::UART, true, false);
             } else {
                 TransmitEnqueuedByte();
@@ -124,15 +116,20 @@ namespace serial
     {
         gpio_init(pin::DTR);
         gpio_set_dir(pin::DTR, GPIO_IN);
-
-        uart_init(pin::UART, pin::UART_Baudrate);
-        uart_set_format(pin::UART, 7, 1, UART_PARITY_NONE);
-        uart_set_fifo_enabled(pin::UART, false);
         gpio_set_function(pin::UART_RX, GPIO_FUNC_UART);
         gpio_set_function(pin::UART_TX, GPIO_FUNC_UART);
 
         irq_set_exclusive_handler(pin::UART_IRQ, OnUartIrq);
         irq_set_enabled(pin::UART_IRQ, true);
+        Reset();
+    }
+
+    void SerialMouse::Reset()
+    {
+        // Resets the port to 1200N1, for mice
+        uart_init(pin::UART, pin::UART_Baudrate);
+        uart_set_format(pin::UART, 7, 1, UART_PARITY_NONE);
+        uart_set_fifo_enabled(pin::UART, false);
         // IRQ will be enabled once it is needed
         uart_set_irq_enables(pin::UART, true, false);
     }
@@ -172,11 +169,10 @@ namespace serial
     {
         const auto dtr = gpio_get(pin::DTR);
         if (std::exchange(previous_dtr_state, dtr) == dtr) return;
-
-        printf("Detect DTR toggle, was %d\n", !!dtr);
         if (!dtr) {
-            printf("Sending ID\n");
+            printf("serial: sending mouse handshake\n");
             const auto irq_state = save_and_disable_interrupts();
+            Reset();
             EnqueueByte('M');
             EnqueueByte('3');
             restore_interrupts(irq_state);
