@@ -22,21 +22,5 @@
  * THE SOFTWARE.
  *
  */
-#pragma once
 
-namespace mouse
-{
-    struct MouseEvent;
-}
-
-namespace serial
-{
-    struct SerialMouse
-    {
-        bool previous_dtr_state{};
-    public:
-        SerialMouse();
-        void Run();
-        void SendEvent(const mouse::MouseEvent& event);
-    };
-}
+// https://www.burtonsys.com/ps2_chapweske.htm

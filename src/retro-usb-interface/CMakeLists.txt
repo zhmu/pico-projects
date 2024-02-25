@@ -8,6 +8,7 @@ add_executable(${PROJECT}
         src/uhid.cpp
         src/mouse.cpp
         src/serial.cpp
+        src/keyboard.cpp
 )
 target_link_libraries(${PROJECT} PUBLIC pico_stdlib pico_time tinyusb_host tinyusb_board)
 

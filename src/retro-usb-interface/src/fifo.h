@@ -41,6 +41,11 @@ public:
         return readOffset == writeOffset;
     }
 
+    void clear()
+    {
+        readOffset = writeOffset;
+    }
+
     bool full() const
     {
         return bytes_left() <= 1;
@@ -48,22 +53,29 @@ public:
 
     size_t bytes_left() const
     {
-        if (readOffset < writeOffset) {
+        if (readOffset == writeOffset) {
+            return 0;
+        } else if (readOffset < writeOffset) {
             return writeOffset - readOffset;
         } else {
             return (buffer.size() - readOffset) + writeOffset;
         }
     }
 
-    auto peek() const
+    auto peek(size_t offset = 0) const
     {
-        return buffer[readOffset];
+        return buffer[(readOffset + offset) % buffer.size()];
+    }
+
+    void drop(size_t amount)
+    {
+        readOffset = (readOffset + amount) % buffer.size();
     }
 
     auto pop()
     {
         auto value = std::move(buffer[readOffset]);
-        readOffset = (readOffset + 1) % buffer.size();
+        drop(1);
         return value;
     }
 

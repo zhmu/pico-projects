@@ -62,6 +62,8 @@
 #include "pico/stdlib.h"
 #include "hardware/sync.h"
 
+void umass_read_sector(uint32_t sector_nr, uint8_t* buffer);
+
 namespace serial 
 {
     namespace pin {
@@ -69,14 +71,50 @@ namespace serial
 
         static auto inline UART = uart1;
         static auto inline UART_IRQ = UART1_IRQ;
-        static constexpr auto inline UART_Baudrate = 1'200;
         static constexpr auto inline UART_TX = 4;
         static constexpr auto inline UART_RX = 5;
+
+        static constexpr auto inline UART_Mouse_Baudrate = 1'200;
+        static constexpr auto inline UART_Mouse_DataBits = 7;
+        static constexpr auto inline UART_Mouse_StopBits = 1;
+        static constexpr auto inline UART_Mouse_Parity = UART_PARITY_NONE;
+
+        static constexpr auto inline UART_Storage_Baudrate = 115'200;
+        static constexpr auto inline UART_Storage_DataBits = 8;
+        static constexpr auto inline UART_Storage_StopBits = 1;
+        static constexpr auto inline UART_Storage_Parity = UART_PARITY_NONE;
     }
 
     namespace {
         Fifo<16> transmitFifo;
         Fifo<16> receiveFifo;
+        std::array<uint8_t, 512> sector_buffer;
+
+        uint16_t UpdateCRC16(uint16_t crc, uint8_t byte)
+        {
+            crc = crc ^ (byte << 8);
+            for(int n = 0; n < 8; ++n) {
+                const auto carry = crc & 0x8000;
+                crc = crc << 1;
+                if (carry) {
+                    crc = crc ^ 0x1021;
+                }
+            }
+            return crc;
+        }
+
+        void ResetUart(int baudrate, int dataBits, int stopBits, uart_parity_t parity)
+        {
+            int x = uart_init(pin::UART, baudrate);
+            uart_set_format(pin::UART, dataBits, stopBits, parity);
+            uart_set_fifo_enabled(pin::UART, false);
+            // TX IRQ will be enabled once it is needed
+            uart_set_irq_enables(pin::UART, true, false);
+
+            transmitFifo.clear();
+            receiveFifo.clear();
+        }
+
 
         void TransmitEnqueuedByte()
         {
@@ -99,7 +137,8 @@ namespace serial
     {
         while(uart_is_readable(pin::UART)) {
             auto ch = uart_getc(pin::UART);
-            transmitFifo.push(std::move(ch));
+            printf("{%x}", ch);
+            receiveFifo.push(std::move(ch));
         }
 
         if (uart_is_writable(pin::UART)) {
@@ -121,17 +160,8 @@ namespace serial
 
         irq_set_exclusive_handler(pin::UART_IRQ, OnUartIrq);
         irq_set_enabled(pin::UART_IRQ, true);
-        Reset();
-    }
-
-    void SerialMouse::Reset()
-    {
         // Resets the port to 1200N1, for mice
-        uart_init(pin::UART, pin::UART_Baudrate);
-        uart_set_format(pin::UART, 7, 1, UART_PARITY_NONE);
-        uart_set_fifo_enabled(pin::UART, false);
-        // IRQ will be enabled once it is needed
-        uart_set_irq_enables(pin::UART, true, false);
+        ResetUart(pin::UART_Mouse_Baudrate, pin::UART_Mouse_DataBits, pin::UART_Mouse_StopBits, pin::UART_Mouse_Parity);
     }
 
     void SerialMouse::SendEvent(const mouse::MouseEvent& event)
@@ -157,25 +187,56 @@ namespace serial
         const uint8_t byte2 = (y & 0b0011'1111);
         const uint8_t byte3 = (event.button & mouse::ButtonMiddle) ? 0b010'0000 : 0;
 
-        const auto irq_state = save_and_disable_interrupts();
+        irq_set_enabled(pin::UART_IRQ, false);
         EnqueueByte(byte0);
         EnqueueByte(byte1);
         EnqueueByte(byte2);
         if (byte3) EnqueueByte(byte3);
-        restore_interrupts(irq_state);
+        irq_set_enabled(pin::UART_IRQ, true);
     }
 
     void SerialMouse::Run()
     {
         const auto dtr = gpio_get(pin::DTR);
-        if (std::exchange(previous_dtr_state, dtr) == dtr) return;
-        if (!dtr) {
+        if (std::exchange(previous_dtr_state, dtr) != dtr && !dtr) {
             printf("serial: sending mouse handshake\n");
-            const auto irq_state = save_and_disable_interrupts();
-            Reset();
+            irq_set_enabled(pin::UART_IRQ, false);
+            ResetUart(pin::UART_Mouse_Baudrate, pin::UART_Mouse_DataBits, pin::UART_Mouse_StopBits, pin::UART_Mouse_Parity);
             EnqueueByte('M');
             EnqueueByte('3');
-            restore_interrupts(irq_state);
+            irq_set_enabled(pin::UART_IRQ, true);
+            return;
         }
+
+        irq_set_enabled(pin::UART_IRQ, false);
+        const auto len = receiveFifo.bytes_left();
+        if (len >= 2 && receiveFifo.peek(0) == '*' && receiveFifo.peek(1) == '^') {
+            printf("serial: got umass handshake\n");
+            // Use a busy-waiting send here - we need to ensure the bytes
+            // receive their target before we reprogram the UART
+            uart_write_blocking(pin::UART, reinterpret_cast<const uint8_t*>("KO"), 2);
+
+            // Give remove side some time to read the data before we clear the FIFO
+            sleep_ms(100);
+
+            // Reprogram to storage mode
+            ResetUart(pin::UART_Storage_Baudrate, pin::UART_Storage_DataBits, pin::UART_Storage_StopBits, pin::UART_Storage_Parity);
+        } else if (len >= 5 && receiveFifo.peek(0) == 'R') {
+            receiveFifo.drop(1);
+            uint32_t sector_nr = static_cast<uint32_t>(receiveFifo.pop()) << 24;
+            sector_nr |= static_cast<uint32_t>(receiveFifo.pop()) << 16;
+            sector_nr |= static_cast<uint32_t>(receiveFifo.pop()) << 8;
+            sector_nr |= static_cast<uint32_t>(receiveFifo.pop()) << 0;
+            printf("serial: receive %d\n", sector_nr);
+            umass_read_sector(sector_nr + 63, sector_buffer.data());
+            uint16_t crc = 0;
+            for(size_t n = 0; n < sector_buffer.size(); ++n) {
+                EnqueueByte(sector_buffer[n]);
+                crc = UpdateCRC16(crc, sector_buffer[n]);
+            }
+            EnqueueByte(crc >> 8);
+            EnqueueByte(crc & 0xff);
+        }
+        irq_set_enabled(pin::UART_IRQ, true);
     }
 }
