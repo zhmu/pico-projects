@@ -15,3 +15,6 @@ target_link_libraries(${PROJECT} PUBLIC pico_stdlib pico_time tinyusb_host tinyu
 # TinyUSB expects to be able to include tusb_config.h from wherever, so
 # add it to the include path
 target_include_directories(${PROJECT} PUBLIC ${CMAKE_CURRENT_LIST_DIR}/src/config)
+
+# create map/bin/hex file etc.
+pico_add_extra_outputs(${PROJECT})

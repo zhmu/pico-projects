@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: MIT
  *
- * Copyright (c) 2023 Rink Springer
+ * Copyright (c) 2023-2025 Rink Springer
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,5 +22,183 @@
  * THE SOFTWARE.
  *
  */
+#include <stdlib.h>
+#include <stdio.h>
+#include <deque>
+#include "pico/stdlib.h"
+#include "pico/time.h"
+#include "bsp/board.h"
+#include "keyboard.h"
 
 // https://www.burtonsys.com/ps2_chapweske.htm
+
+namespace keyboard
+{
+    namespace pin
+    {
+        static constexpr auto inline KeyboardClockN = 10;
+        static constexpr auto inline KeyboardDataN = 11;
+        static constexpr auto inline KeyboardClockReadN = 12;
+        static constexpr auto inline KeyboardDataReadN = 13;
+
+        static constexpr auto inline DebugOut1 = 15;
+        static constexpr auto inline DebugOut2 = 16;
+        static constexpr auto inline DebugOut3 = 17;
+    }
+
+    namespace
+    {
+        void ClockPulse()
+        {
+            gpio_put(pin::KeyboardClockN, 0);
+            busy_wait_us(400);
+            gpio_put(pin::KeyboardClockN, 1);
+            busy_wait_us(400);
+        }
+
+        int SendByte(uint8_t scancode)
+        {
+            gpio_put(pin::DebugOut3, 1);
+            busy_wait_us(100);
+
+            // Calculate parity
+            int parity = 1;
+            for(int n = 0; n < 8; ++n) {
+                if (scancode & (1 << n))
+                    parity ^= 1;
+            }
+
+            // Wait until the clock is high
+            while(gpio_get(pin::KeyboardClockReadN) == 0);
+
+            // Generate the data packt
+            //uint16_t v = 0b11'00011110'0;
+            uint16_t v = 0b10'00000000'0;
+            /*             ^^ \------/ ^*/
+            /*        stop-/|   data   |*/
+            /*            parity     start*/
+            v |= (static_cast<uint16_t>(scancode) << 1);
+            v |= (parity << 9);
+            for(int n = 0; n < 11; ++n) {
+                if (gpio_get(pin::KeyboardClockReadN) == 0) {
+                    printf("SendByte: host messing with the clock, aborting\n");
+                    // Release bus
+                    gpio_put(pin::KeyboardDataN, 1);
+                    gpio_put(pin::KeyboardClockN, 1);
+                    // Pulse debug2 to make this visible
+                    gpio_put(pin::DebugOut2, 1);
+                    busy_wait_us(10);
+                    gpio_put(pin::DebugOut2, 0);
+                    return 0;
+                }
+                gpio_put(pin::KeyboardDataN, v & 1);
+                ClockPulse();
+                v >>= 1;
+            }
+
+            // Release data/clock
+            gpio_put(pin::KeyboardDataN, 1);
+            gpio_put(pin::KeyboardClockN, 1);
+            busy_wait_us(400);
+            gpio_put(pin::DebugOut3, 0);
+            return 1;
+        }
+    }
+
+    Keyboard::Keyboard()
+    {
+        gpio_init(pin::KeyboardClockN);
+        gpio_init(pin::KeyboardDataN);
+        gpio_init(pin::KeyboardClockReadN);
+        gpio_init(pin::KeyboardDataReadN);
+        gpio_init(pin::DebugOut1);
+        gpio_init(pin::DebugOut2);
+        gpio_init(pin::DebugOut3);
+        gpio_set_dir(pin::KeyboardClockN, GPIO_OUT);
+        gpio_set_dir(pin::KeyboardDataN, GPIO_OUT);
+        gpio_set_dir(pin::DebugOut1, GPIO_OUT);
+        gpio_set_dir(pin::DebugOut2, GPIO_OUT);
+        gpio_set_dir(pin::DebugOut3, GPIO_OUT);
+        gpio_set_dir(pin::KeyboardClockReadN, GPIO_IN);
+        gpio_set_dir(pin::KeyboardDataReadN, GPIO_IN);
+        gpio_put(pin::DebugOut1, 0);
+        gpio_put(pin::DebugOut2, 0);
+        gpio_put(pin::DebugOut3, 0);
+
+        // Place both GPIO's high to signal idle bus
+        gpio_put(pin::KeyboardClockN, 1);
+        gpio_put(pin::KeyboardDataN, 1);
+    }
+
+    void Keyboard::Run()
+    {
+        uint32_t intr = save_and_disable_interrupts();
+        if (gpio_get(pin::KeyboardClockReadN) == 0 && gpio_get(pin::KeyboardDataReadN) == 0)
+        {
+            // Clock is LO here (driven by the host), we do not drive data...
+            printf("Detected host RTS\n");
+            gpio_put(pin::DebugOut1, 1);
+
+            // Wait until host releases clock
+            while(gpio_get(pin::KeyboardClockReadN) == 0);
+
+            // Clock in the data
+            uint16_t result = 0;
+            int num_ones = 0;
+            for(unsigned int n = 0; n < 10; ++n) {
+                if (gpio_get(pin::KeyboardDataReadN)) {
+                    result |= (1 << n);
+                    ++num_ones;
+                }
+                ClockPulse();
+            }
+            result >>= 1; // throw away first bit, it's always zero
+            printf("result %x num_ones %d -> data byte %x\n", result, num_ones, result & 0xff);
+
+            // Wait until DATA is released (it goes back hi)
+            while(gpio_get(pin::KeyboardDataReadN) == 0);
+
+            gpio_put(pin::DebugOut2, 1);
+
+            // Acknowledge by bringing data low
+            gpio_put(pin::KeyboardDataN, 0);
+            // Generate clock
+            ClockPulse();
+
+            gpio_put(pin::KeyboardDataN, 1);
+
+            gpio_put(pin::DebugOut2, 0);
+            gpio_put(pin::DebugOut1, 0);
+
+            result &= 0xff;
+            if (result == 0xff) {
+                printf("RESET command\n");
+                bytesToSend.push_back(0xfa);
+                bytesToSend.push_back(0xaa);
+            } else {
+                printf("unknown command %x\n");
+                bytesToSend.push_back(0xfa);
+            }
+        }
+
+        if (!bytesToSend.empty())
+        {
+            uint8_t byte = bytesToSend.front();
+            printf("sending byte %x\n", byte);
+            if (SendByte(byte)) {
+                bytesToSend.pop_front();
+            }
+        }
+
+#if 0
+        printf("KEY!\n");
+        // Scancode set 2
+        constexpr auto codes = std::to_array<uint8_t>({ 0x33, 0x24, 0x4b, 0x4b, 0x44, 0x5a });
+        for(auto c: codes) {
+            SendByte(c);
+            SendByte(0x80 | c);
+        }
+#endif
+        restore_interrupts(intr);
+    }
+}
